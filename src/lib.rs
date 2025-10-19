@@ -126,7 +126,7 @@ impl<L, T> ProgressBuilder<L, T> {
 impl<L, T> ProgressBuilder<L, T>
 where
     L: Display,
-    T: Ord + Display,
+    T: Display,
 {
     pub fn label(&mut self, label: L) -> &mut Self {
         self.label = Some(label);
@@ -143,7 +143,7 @@ where
         self
     }
 
-    pub fn build(&mut self) -> Result<Progress<L, T>, BuildError> {
+    pub fn build(&mut self) -> Result<Progress<T>, BuildError> {
         let Some(label) = self.label.take() else {
             return Err(BuildError::MissingLabel);
         };
@@ -154,24 +154,29 @@ where
             return Err(BuildError::MissingInit);
         };
 
-        Ok(Progress::new(label, max, init, Arc::clone(&self.group)))
+        Ok(Progress::new(
+            label.to_string(),
+            max,
+            init,
+            Arc::clone(&self.group),
+        ))
     }
 }
 
-pub struct Progress<L, T> {
-    label: L,
+pub struct Progress<T> {
+    label: String,
     max: T,
     current: T,
     line: usize,
     group: Arc<ProgressGroup>,
 }
 
-impl<L, T> Progress<L, T> {
-    pub fn builder(group: Arc<ProgressGroup>) -> ProgressBuilder<L, T> {
+impl<T> Progress<T> {
+    pub fn builder<L>(group: Arc<ProgressGroup>) -> ProgressBuilder<L, T> {
         ProgressBuilder::new(group)
     }
 
-    fn new(label: L, max: T, current: T, group: Arc<ProgressGroup>) -> Self {
+    fn new(label: String, max: T, current: T, group: Arc<ProgressGroup>) -> Self {
         // provide space to do things
         println!();
         Self {
@@ -187,15 +192,14 @@ impl<L, T> Progress<L, T> {
         }
     }
 
-    pub fn set_label(&mut self, label: L) -> L {
-        std::mem::replace(&mut self.label, label)
+    pub fn set_label(&mut self, label: impl Display) {
+        self.label = label.to_string()
     }
 }
 
-impl<L, T> Progress<L, T>
+impl<T> Progress<T>
 where
-    L: Display,
-    T: Ord + Display + Progressable,
+    T: Display + Progressable,
 {
     pub fn update(&mut self, new: T) {
         let progress = new.progress(&self.max);
@@ -207,16 +211,13 @@ where
     fn draw(&self, progress: ProgressValue) {
         let line = self.group.lines.load(std::sync::atomic::Ordering::Relaxed) - self.line + 1;
 
-        // TODO: determine how std deals with stderr errors and do the same
+        // TODO: determine how std lib deals with stderr errors and do the same
 
         let mut out = std::io::stderr().lock();
 
-        // TODO: print directly to output (but we need its length)
-        let label = self.label.to_string();
-
         self.group
             .label_width
-            .fetch_max(label.len(), std::sync::atomic::Ordering::AcqRel);
+            .fetch_max(self.label.len(), std::sync::atomic::Ordering::AcqRel);
 
         let label_width = self
             .group
@@ -227,12 +228,12 @@ where
         let _ = write!(
             out,
             concat!(
-                "\x1b[?25l", // hide cursor
-                "\x1b[{}A",  // move up `line` lines
-                "\x1b[2N",   // clear line
-                "\r",        // carriage return
+                "\x1b[?25l",    // hide cursor
+                "\x1b[{line}A", // move up `line` lines
+                "\x1b[2N",      // clear line
+                "\r",           // carriage return
             ),
-            line
+            line = line, // write! + concat! is funky
         );
 
         // width - label_width - len('[] ')
@@ -249,19 +250,19 @@ where
 
         let _ = write!(
             out,
-            "[{label:label_width$}] {progress:progress_width$} [{}/{}]",
-            self.current, self.max,
+            "[{0:1$}] {2:3$} [{4}/{5}]",
+            self.label, label_width, progress, progress_width, self.current, self.max,
         );
 
         // suffix:
         let _ = write!(
             out,
             concat!(
-                "\x1b[{}B",  // move down `line` lines
-                "\r",        // carriage return
-                "\x1b[?25h", // show cursor
+                "\x1b[{line}B", // move down `line` lines
+                "\r",           // carriage return
+                "\x1b[?25h",    // show cursor
             ),
-            line
+            line = line, // write! + concat! is funky
         );
 
         let _ = out.flush();
