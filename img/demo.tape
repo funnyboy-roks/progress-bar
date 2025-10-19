@@ -1,0 +1,15 @@
+Output "usage.gif"
+
+Set Shell "bash"
+Set FontSize 18
+Set FontFamily "Iosevka"
+Set Width 1200
+Set Height 600
+Set Padding 10
+
+Ctrl+l
+
+Type "cargo run --example multi" Sleep 200ms  Enter
+Sleep 6s
+
+Ctrl+l
