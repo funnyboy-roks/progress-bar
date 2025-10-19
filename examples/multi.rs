@@ -35,8 +35,8 @@ fn main() {
     bar!(
         "My very slow progress bar with a long name",
         (0, 10),
-        3000,
-        2000
+        5000,
+        500
     );
 
     threads.into_iter().try_for_each(JoinHandle::join).unwrap();
