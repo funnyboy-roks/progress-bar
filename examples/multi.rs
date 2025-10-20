@@ -1,10 +1,17 @@
 use std::{sync::Arc, thread::JoinHandle};
 
-use prog::{Progress, ProgressGroup};
+use prog::{Progress, ProgressGroup, ProgressStyle};
 
 fn main() {
     let mut threads = Vec::new();
-    let group = ProgressGroup::builder().width(100).build();
+    let group = ProgressGroup::builder()
+        .width(100)
+        .style(ProgressStyle {
+            label_frame: ("", "     ["),
+            ratio_frame: ("] ", ""),
+            ..Default::default()
+        })
+        .build();
 
     macro_rules! bar {
         ($label: expr, ($start: expr, $end: expr), $time_ms: expr, $delayed_ms: expr) => {

@@ -9,7 +9,7 @@ Set Padding 10
 
 Ctrl+l
 
-Type "cargo run --example multi" Sleep 200ms  Enter
+Type "cargo run -q --example multi" Sleep 200ms  Enter
 Sleep 6s
 
 Ctrl+l
