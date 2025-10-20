@@ -113,7 +113,10 @@ impl ProgressGroupBuilder {
         let width = if let Some(width) = self.width {
             width
         } else {
-            todo!("get width from terminal")
+            terminal_size::terminal_size()
+                .expect("failed to get terminal size")
+                .0
+                 .0 as _
         };
         Arc::new(ProgressGroup::new(width, self.style))
     }
@@ -245,27 +248,23 @@ where
             group,
         };
 
-        this.draw(ProgressValue {
-            numerator: 0,
-            denominator: 1,
-        });
+        this.draw();
 
         this
     }
 
     pub fn set_label(&mut self, label: impl Display) {
         self.label = label.to_string();
-        self.draw(self.current.progress(&self.max));
+        self.draw();
     }
 
     pub fn update(&mut self, new: T) {
-        let progress = new.progress(&self.max);
         self.current = new;
-
-        self.draw(progress);
+        self.draw();
     }
 
-    fn draw(&self, p: ProgressValue) {
+    pub fn draw(&self) {
+        let p = self.current.progress(&self.max);
         let line = self.group.lines.load(Ordering::Relaxed) - self.line + 1;
 
         // TODO: determine how std lib deals with stderr errors and do the same
