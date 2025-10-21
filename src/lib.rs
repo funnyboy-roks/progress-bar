@@ -103,12 +103,18 @@ impl Default for ProgressStyle {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ProgressGroupBuilder {
     width: Option<usize>,
+    progress_width: Option<usize>,
     style: ProgressStyle,
 }
 
 impl ProgressGroupBuilder {
     pub fn width(&mut self, width: usize) -> &mut Self {
         self.width = Some(width);
+        self
+    }
+
+    pub fn progress_width(&mut self, progress_width: usize) -> &mut Self {
+        self.progress_width = Some(progress_width);
         self
     }
 
@@ -126,7 +132,7 @@ impl ProgressGroupBuilder {
                 .0
                  .0 as _
         };
-        Arc::new(ProgressGroup::new(width, self.style))
+        Arc::new(ProgressGroup::new(width, self.progress_width, self.style))
     }
 }
 
@@ -150,6 +156,7 @@ pub struct ProgressDisplay {
 pub struct ProgressGroup {
     items: RwLock<Vec<ProgressDisplay>>,
     width: usize,
+    progress_width: Option<usize>,
     is_drawing: AtomicBool,
     style: ProgressStyle,
     /// [ 5/10]
@@ -167,10 +174,11 @@ impl ProgressGroup {
         ProgressGroupBuilder::default()
     }
 
-    fn new(width: usize, style: ProgressStyle) -> Self {
+    fn new(width: usize, progress_width: Option<usize>, style: ProgressStyle) -> Self {
         Self {
             items: RwLock::new(Vec::new()),
             width,
+            progress_width,
             is_drawing: AtomicBool::new(false),
             style,
             num_len: Default::default(),
@@ -258,8 +266,7 @@ impl ProgressGroup {
             out,
             concat!(
                 "\x1b[?25l", // hide cursor
-                "\x1b[{}A",  // move up lines
-                "\r",        // carriage return
+                "\x1b[{}F",  // move up lines
             ),
             items.len(),
         );
@@ -281,42 +288,33 @@ impl ProgressGroup {
                 Some(&text.num_string)
             };
 
-            let progress_width = self.width
-                - label_len
-                - self.style.label_frame.0.len()
-                - self.style.label_frame.1.len()
-                - self.style.progress_frame.0.len()
-                - self.style.progress_frame.1.len()
-                - self.style.ratio_frame.0.len()
-                - self.style.ratio_frame.1.len()
-                - if let Some(frame) = self.style.remaining_frame {
-                    // '00:00'
-                    5 + frame.0.len() + frame.1.len()
-                } else {
-                    0
-                }
-                - if self.style.use_percent {
+            let full_label_len =
+                label_len + self.style.label_frame.0.len() + self.style.label_frame.1.len();
+
+            let full_ratio_len = self.style.ratio_frame.0.len()
+                + self.style.ratio_frame.1.len()
+                + if self.style.use_percent {
                     4 // '100%'
                 } else {
                     num_len + 1 + den_len
-                }
-                - status_len;
+                };
 
-            // TODO: make this not allocate
-            let progress_text: String = if numerator >= denominator {
-                std::iter::repeat_n(self.style.done, progress_width).collect()
+            let full_remaining_len = if let Some(frame) = self.style.remaining_frame {
+                // '00:00'
+                5 + frame.0.len() + frame.1.len()
             } else {
-                let eqs = (progress_width as u64 * numerator / denominator) as usize;
-                let end_len = self.style.end.chars().count();
-                let len = eqs + if self.style.end.is_empty() { 0 } else { 1 };
-                std::iter::repeat_n(
-                    self.style.bar,
-                    eqs.saturating_sub(end_len.saturating_sub(1)),
-                )
-                .chain(self.style.end.chars())
-                .chain(std::iter::repeat_n(self.style.empty, progress_width - len))
-                .collect()
+                0
             };
+
+            let progress_width = self.progress_width.unwrap_or_else(|| {
+                self.width
+                    - full_label_len
+                    - full_remaining_len
+                    - self.style.progress_frame.0.len()
+                    - self.style.progress_frame.1.len()
+                    - full_ratio_len
+                    - status_len
+            });
 
             // label
             let _ = write!(
@@ -347,6 +345,22 @@ impl ProgressGroup {
                 }
             }
 
+            // TODO: make this not allocate
+            let progress_text: String = if numerator >= denominator {
+                std::iter::repeat_n(self.style.done, progress_width).collect()
+            } else {
+                let eqs = (progress_width as u64 * numerator / denominator) as usize;
+                let end_len = self.style.end.chars().count();
+                let len = eqs + if self.style.end.is_empty() { 0 } else { 1 };
+                std::iter::repeat_n(
+                    self.style.bar,
+                    eqs.saturating_sub(end_len.saturating_sub(1)),
+                )
+                .chain(self.style.end.chars())
+                .chain(std::iter::repeat_n(self.style.empty, progress_width - len))
+                .collect()
+            };
+
             // progress bar
             let _ = write!(
                 out,
@@ -376,30 +390,51 @@ impl ProgressGroup {
                 )
             };
 
-            if let Some(ref status) = text.status {
+            if let Some(ref status) = text.status && !status.is_empty() {
+                let status_truncate = self
+                    .width
+                    .saturating_sub(full_label_len)
+                    .saturating_sub(full_remaining_len)
+                    .saturating_sub(self.style.progress_frame.0.len())
+                    .saturating_sub(progress_width)
+                    .saturating_sub(self.style.progress_frame.1.len())
+                    .saturating_sub(full_ratio_len)
+                    .saturating_sub(self.style.status_frame.0.len())
+                    .saturating_sub(self.style.status_frame.1.len());
+
+                let (status, truncated) = if status_truncate < status.len() {
+                    if status_truncate == 0 {
+                        ("", "")
+                    } else {
+                        (&status[..status_truncate-1], "…")
+                    }
+                } else {
+                    (status.as_str(), "")
+                };
+
                 let _ = write!(
                     out,
-                    "{open}{}{close}",
+                    "{open}{}{}{close}",
                     status,
+                    truncated,
                     open = self.style.status_frame.0,
                     close = self.style.status_frame.1,
                 );
             }
 
             // suffix
-            let _ = write!(
+            let _ = writeln!(
                 out,
-                concat!(
-                    "\x1b[0K", // clear rest of line
-                    "\r",      // carriage return
-                    "\x1b[1B", // down one line
-                ),
+                "\x1b[0K", // clear rest of line
             );
         }
 
         let _ = write!(
             out,
-            "\x1b[?25h", // show cursor
+            concat!(
+                "\x1b[?25h", // show cursor
+                "\x1b[0K",   // clear rest of line
+            )
         );
         let _ = out.flush();
 
