@@ -2,8 +2,8 @@ use std::{
     fmt::Display,
     io::Write,
     sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        Arc, RwLock,
     },
     time::Instant,
 };
@@ -131,18 +131,35 @@ impl ProgressGroupBuilder {
 }
 
 #[derive(Debug)]
+pub struct ProgressDisplayText {
+    label: String,
+    status: Option<String>,
+    num_string: String,
+    max_string: String,
+}
+
+#[derive(Debug)]
+pub struct ProgressDisplay {
+    text: RwLock<ProgressDisplayText>,
+    numerator: AtomicU64,
+    denominator: AtomicU64,
+    started: Instant,
+}
+
+#[derive(Debug)]
 pub struct ProgressGroup {
+    items: RwLock<Vec<ProgressDisplay>>,
     width: usize,
+    is_drawing: AtomicBool,
     style: ProgressStyle,
-    lines: AtomicUsize,
     /// [ 5/10]
     ///  ^^
     num_len: AtomicUsize,
     /// [ 5/10]
     ///     ^^
     den_len: AtomicUsize,
-    label_width: AtomicUsize,
-    status_width: AtomicUsize,
+    label_len: AtomicUsize,
+    status_len: AtomicUsize,
 }
 
 impl ProgressGroup {
@@ -152,14 +169,241 @@ impl ProgressGroup {
 
     fn new(width: usize, style: ProgressStyle) -> Self {
         Self {
+            items: RwLock::new(Vec::new()),
             width,
+            is_drawing: AtomicBool::new(false),
             style,
-            lines: Default::default(),
             num_len: Default::default(),
             den_len: Default::default(),
-            label_width: Default::default(),
-            status_width: Default::default(),
+            label_len: Default::default(),
+            status_len: Default::default(),
         }
+    }
+
+    pub fn reset_widths(&self) {
+        self.num_len.store(0, Ordering::Release);
+        self.den_len.store(0, Ordering::Release);
+        self.label_len.store(0, Ordering::Release);
+        self.status_len.store(0, Ordering::Release);
+    }
+
+    pub fn draw(&self) {
+        if self
+            .is_drawing
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+
+        let items = self.items.read().unwrap();
+
+        let lens = items.iter().map(|x| {
+            let text = x.text.read().unwrap();
+            (
+                text.status.as_ref().map(|x| x.len()),
+                text.label.len(),
+                text.num_string.len(),
+                text.max_string.len(),
+            )
+        });
+        let mut label_len = None;
+        let mut status_len = None;
+        let mut num_len = None;
+        let mut den_len = None;
+
+        for (status, label, num, den) in lens {
+            if status_len.is_none_or(|s| s < status) {
+                status_len = Some(status);
+            }
+            if label_len.is_none_or(|l| l < label) {
+                label_len = Some(label);
+            }
+            if num_len.is_none_or(|s| s < num) {
+                num_len = Some(num);
+            }
+            if den_len.is_none_or(|s| s < den) {
+                den_len = Some(den);
+            }
+        }
+
+        let (Some(label_len), Some(status_len), Some(num_len), Some(den_len)) =
+            (label_len, status_len, num_len, den_len)
+        else {
+            return;
+        };
+
+        let label_len = self
+            .label_len
+            .fetch_max(label_len, Ordering::AcqRel)
+            .max(label_len);
+        let num_len = self
+            .num_len
+            .fetch_max(num_len, Ordering::AcqRel)
+            .max(num_len);
+        let den_len = self
+            .den_len
+            .fetch_max(den_len, Ordering::AcqRel)
+            .max(den_len);
+        let status_len = status_len.map(|status_len| {
+            self.status_len
+                .fetch_max(status_len, Ordering::AcqRel)
+                .max(status_len)
+        });
+
+        let mut out = std::io::stderr().lock();
+
+        // prefix
+        let _ = write!(
+            out,
+            concat!(
+                "\x1b[?25l", // hide cursor
+                "\x1b[{}A",  // move up lines
+                "\r",        // carriage return
+            ),
+            items.len(),
+        );
+
+        for progress in &*items {
+            let text = progress.text.read().unwrap();
+            let numerator = progress.numerator.load(Ordering::Relaxed);
+            let denominator = progress.denominator.load(Ordering::Relaxed);
+
+            // TODO: determine how std lib deals with stderr errors and do the same
+
+            let status_len = status_len.unwrap_or(0)
+                + self.style.status_frame.0.len()
+                + self.style.status_frame.1.len();
+
+            let num_str = if self.style.use_percent {
+                None
+            } else {
+                Some(&text.num_string)
+            };
+
+            let progress_width = self.width
+                - label_len
+                - self.style.label_frame.0.len()
+                - self.style.label_frame.1.len()
+                - self.style.progress_frame.0.len()
+                - self.style.progress_frame.1.len()
+                - self.style.ratio_frame.0.len()
+                - self.style.ratio_frame.1.len()
+                - if let Some(frame) = self.style.remaining_frame {
+                    // '00:00'
+                    5 + frame.0.len() + frame.1.len()
+                } else {
+                    0
+                }
+                - if self.style.use_percent {
+                    4 // '100%'
+                } else {
+                    num_len + 1 + den_len
+                }
+                - status_len;
+
+            // TODO: make this not allocate
+            let progress_text: String = if numerator >= denominator {
+                std::iter::repeat_n(self.style.done, progress_width).collect()
+            } else {
+                let eqs = (progress_width as u64 * numerator / denominator) as usize;
+                let end_len = self.style.end.chars().count();
+                let len = eqs + if self.style.end.is_empty() { 0 } else { 1 };
+                std::iter::repeat_n(
+                    self.style.bar,
+                    eqs.saturating_sub(end_len.saturating_sub(1)),
+                )
+                .chain(self.style.end.chars())
+                .chain(std::iter::repeat_n(self.style.empty, progress_width - len))
+                .collect()
+            };
+
+            // label
+            let _ = write!(
+                out,
+                "{open}{:label_len$}{close}",
+                text.label,
+                open = self.style.label_frame.0,
+                close = self.style.label_frame.1,
+            );
+
+            // remaining
+            if let Some(ref frame) = self.style.remaining_frame {
+                let elapsed = progress.started.elapsed();
+                if numerator == 0 {
+                    let _ = write!(out, "{open}--:--{close}", open = frame.0, close = frame.1,);
+                } else {
+                    let remaining = (elapsed.as_millis() as u64 * denominator / numerator)
+                        .saturating_sub(elapsed.as_millis() as u64)
+                        .div_ceil(1000);
+                    let _ = write!(
+                        out,
+                        "{open}{:02}:{:02}{close}",
+                        remaining / 60,
+                        remaining % 60,
+                        open = frame.0,
+                        close = frame.1,
+                    );
+                }
+            }
+
+            // progress bar
+            let _ = write!(
+                out,
+                "{open}{:progress_width$}{close}",
+                progress_text,
+                open = self.style.progress_frame.0,
+                close = self.style.progress_frame.1,
+            );
+
+            // progress number
+            let _ = if self.style.use_percent {
+                write!(
+                    out,
+                    "{open}{:>3}%{close}",
+                    (numerator * 100 / denominator).clamp(0, 100),
+                    open = self.style.ratio_frame.0,
+                    close = self.style.ratio_frame.1,
+                )
+            } else {
+                write!(
+                    out,
+                    "{open}{:^num_len$}/{:^den_len$}{close}",
+                    num_str.unwrap(),
+                    text.max_string,
+                    open = self.style.ratio_frame.0,
+                    close = self.style.ratio_frame.1,
+                )
+            };
+
+            if let Some(ref status) = text.status {
+                let _ = write!(
+                    out,
+                    "{open}{}{close}",
+                    status,
+                    open = self.style.status_frame.0,
+                    close = self.style.status_frame.1,
+                );
+            }
+
+            // suffix
+            let _ = write!(
+                out,
+                concat!(
+                    "\x1b[0K", // clear rest of line
+                    "\r",      // carriage return
+                    "\x1b[1B", // down one line
+                ),
+            );
+        }
+
+        let _ = write!(
+            out,
+            "\x1b[?25h", // show cursor
+        );
+        let _ = out.flush();
+
+        self.is_drawing.store(false, Ordering::Release);
     }
 }
 
@@ -223,14 +467,10 @@ where
 }
 
 pub struct Progress<T> {
-    label: String,
-    status: Option<String>,
+    index: usize,
     max: T,
-    max_string: String,
     current: T,
-    line: usize,
     group: Arc<ProgressGroup>,
-    started: Instant,
 }
 
 impl<T> Progress<T> {
@@ -249,17 +489,28 @@ where
 
         let max_string = max.to_string();
 
-        group.den_len.fetch_max(max_string.len(), Ordering::AcqRel);
+        let index = {
+            let mut items = group.items.write().unwrap();
+            let index = items.len();
+            items.push(ProgressDisplay {
+                text: RwLock::new(ProgressDisplayText {
+                    label,
+                    status: None,
+                    max_string,
+                    num_string: current.to_string(),
+                }),
+                numerator: AtomicU64::new(0),
+                denominator: AtomicU64::new(1),
+                started: Instant::now(),
+            });
+            index
+        };
 
         let this = Self {
-            label,
-            status: None,
+            index,
             max,
-            max_string,
             current,
-            line: group.lines.fetch_add(1, Ordering::Acquire) + 1,
             group,
-            started: Instant::now(),
         };
 
         this.draw();
@@ -268,201 +519,47 @@ where
     }
 
     pub fn set_label(&mut self, label: impl Display) {
-        self.label = label.to_string();
+        self.group.items.read().unwrap()[self.index]
+            .text
+            .write()
+            .unwrap()
+            .label = label.to_string();
         self.draw();
     }
 
     pub fn set_status(&mut self, status: impl Display) {
-        self.status = Some(status.to_string());
+        self.group.items.read().unwrap()[self.index]
+            .text
+            .write()
+            .unwrap()
+            .status = Some(status.to_string());
         self.draw();
     }
 
     pub fn clear_status(&mut self) {
-        self.status = None;
+        self.group.items.read().unwrap()[self.index]
+            .text
+            .write()
+            .unwrap()
+            .status = None;
         self.draw();
     }
 
     pub fn update(&mut self, new: T) {
         self.current = new;
+
+        let item = &self.group.items.read().unwrap()[self.index];
+
+        item.text.write().unwrap().num_string = self.current.to_string();
+
+        let prog = self.current.progress(&self.max);
+        item.numerator.store(prog.numerator, Ordering::Release);
+        item.denominator.store(prog.denominator, Ordering::Release);
+
         self.draw();
     }
 
     pub fn draw(&self) {
-        let p = self.current.progress(&self.max);
-        let line = self.group.lines.load(Ordering::Relaxed) - self.line + 1;
-
-        // TODO: determine how std lib deals with stderr errors and do the same
-
-        let mut out = std::io::stderr().lock();
-
-        // prefix
-        let _ = write!(
-            out,
-            concat!(
-                "\x1b[?25l",    // hide cursor
-                "\x1b[{line}A", // move up `line` lines
-                "\r",           // carriage return
-            ),
-            line = line, // write! + concat! is funky
-        );
-
-        let label_width = self
-            .group
-            .label_width
-            .fetch_max(self.label.len(), Ordering::AcqRel)
-            .max(self.label.len());
-
-        let status_width = if let Some(ref status) = self.status {
-            self.group
-                .status_width
-                .fetch_max(status.len(), Ordering::AcqRel)
-                .max(status.len())
-        } else {
-            self.group.status_width.load(Ordering::Relaxed)
-        } + self.group.style.status_frame.0.len()
-            + self.group.style.status_frame.1.len();
-
-        let (num_str, num_len, den_len) = if self.group.style.use_percent {
-            (None, 0, 0)
-        } else {
-            let num_str = self.current.to_string();
-            let num_str_len = num_str.len();
-            (
-                Some(num_str),
-                self.group
-                    .num_len
-                    .fetch_max(num_str_len, Ordering::AcqRel)
-                    .max(num_str_len),
-                self.group.den_len.load(Ordering::Relaxed),
-            )
-        };
-
-        let progress_width = self.group.width
-            - label_width
-            - self.group.style.label_frame.0.len()
-            - self.group.style.label_frame.1.len()
-            - self.group.style.progress_frame.0.len()
-            - self.group.style.progress_frame.1.len()
-            - self.group.style.ratio_frame.0.len()
-            - self.group.style.ratio_frame.1.len()
-            - if let Some(frame) = self.group.style.remaining_frame {
-                5// '00:00'
-                    + frame.0.len()
-                    + frame.1.len()
-            } else {
-                0
-            }
-            - if self.group.style.use_percent {
-                4 // '100%'
-            } else {
-                num_len + 1 + den_len
-            }
-            - status_width;
-
-        // TODO: make this not allocate
-        let progress: String = if p.numerator >= p.denominator {
-            std::iter::repeat_n(self.group.style.done, progress_width).collect()
-        } else {
-            let eqs = (progress_width as u64 * p.numerator / p.denominator) as usize;
-            let end_len = self.group.style.end.chars().count();
-            let len = eqs
-                + if self.group.style.end.is_empty() {
-                    0
-                } else {
-                    1
-                };
-            std::iter::repeat_n(
-                self.group.style.bar,
-                eqs.saturating_sub(end_len.saturating_sub(1)),
-            )
-            .chain(self.group.style.end.chars())
-            .chain(std::iter::repeat_n(
-                self.group.style.empty,
-                progress_width - len,
-            ))
-            .collect()
-        };
-
-        // label
-        let _ = write!(
-            out,
-            "{open}{:label_width$}{close}",
-            self.label,
-            open = self.group.style.label_frame.0,
-            close = self.group.style.label_frame.1,
-        );
-
-        // remaining
-        if let Some(ref frame) = self.group.style.remaining_frame {
-            let elapsed = self.started.elapsed();
-            if p.numerator == 0 {
-                let _ = write!(out, "{open}--:--{close}", open = frame.0, close = frame.1,);
-            } else {
-                let remaining = (elapsed.as_millis() as u64 * p.denominator / p.numerator)
-                    .saturating_sub(elapsed.as_millis() as u64)
-                    .div_ceil(1000);
-                let _ = write!(
-                    out,
-                    "{open}{:02}:{:02}{close}",
-                    remaining / 60,
-                    remaining % 60,
-                    open = frame.0,
-                    close = frame.1,
-                );
-            }
-        }
-
-        // progress bar
-        let _ = write!(
-            out,
-            "{open}{:progress_width$}{close}",
-            progress,
-            open = self.group.style.progress_frame.0,
-            close = self.group.style.progress_frame.1,
-        );
-
-        // progress number
-        let _ = if self.group.style.use_percent {
-            write!(
-                out,
-                "{open}{:>3}%{close}",
-                (p.numerator * 100 / p.denominator).clamp(0, 100),
-                open = self.group.style.ratio_frame.0,
-                close = self.group.style.ratio_frame.1,
-            )
-        } else {
-            write!(
-                out,
-                "{open}{:^num_len$}/{:^den_len$}{close}",
-                num_str.unwrap(),
-                self.max_string,
-                open = self.group.style.ratio_frame.0,
-                close = self.group.style.ratio_frame.1,
-            )
-        };
-
-        if let Some(ref status) = self.status {
-            let _ = write!(
-                out,
-                "{open}{}{close}",
-                status,
-                open = self.group.style.status_frame.0,
-                close = self.group.style.status_frame.1,
-            );
-        }
-
-        // suffix
-        let _ = write!(
-            out,
-            concat!(
-                "\x1b[0K",      // clear rest of line
-                "\x1b[{line}B", // move down `line` lines
-                "\r",           // carriage return
-                "\x1b[?25h",    // show cursor
-            ),
-            line = line, // write! + concat! is funky
-        );
-
-        let _ = out.flush();
+        self.group.draw();
     }
 }
