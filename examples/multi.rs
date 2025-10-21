@@ -6,8 +6,6 @@ fn main() {
     let mut threads = Vec::new();
     let group = ProgressGroup::builder()
         .style(ProgressStyle {
-            label_frame: ("", "     ["),
-            ratio_frame: ("] ", ""),
             ..Default::default()
         })
         .build();

@@ -5,6 +5,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
+    time::Instant,
 };
 
 // TODO: ensure that atomic ordering is correct
@@ -71,6 +72,10 @@ pub enum BuildError {
 pub struct ProgressStyle {
     pub label_frame: (&'static str, &'static str),
     pub ratio_frame: (&'static str, &'static str),
+    pub status_frame: (&'static str, &'static str),
+    pub progress_frame: (&'static str, &'static str),
+    /// None - don't show remaining time estimate
+    pub remaining_frame: Option<(&'static str, &'static str)>,
     pub bar: char,
     pub end: &'static str,
     pub done: char,
@@ -81,8 +86,11 @@ pub struct ProgressStyle {
 impl Default for ProgressStyle {
     fn default() -> Self {
         Self {
-            label_frame: ("", "     ["),
-            ratio_frame: ("] ", ""),
+            label_frame: ("", " "),
+            ratio_frame: (" ", ""),
+            progress_frame: ("[", "]"),
+            status_frame: ("  ", ""),
+            remaining_frame: Some(("", " ")),
             bar: '=',
             end: ">",
             done: '=',
@@ -134,6 +142,7 @@ pub struct ProgressGroup {
     ///     ^^
     den_len: AtomicUsize,
     label_width: AtomicUsize,
+    status_width: AtomicUsize,
 }
 
 impl ProgressGroup {
@@ -149,19 +158,20 @@ impl ProgressGroup {
             num_len: Default::default(),
             den_len: Default::default(),
             label_width: Default::default(),
+            status_width: Default::default(),
         }
     }
 }
 
 #[derive(Debug)]
-pub struct ProgressBuilder<L, T> {
+pub struct ProgressBuilder<T, L> {
     group: Arc<ProgressGroup>,
     label: Option<L>,
     max: Option<T>,
     init: Option<T>,
 }
 
-impl<L, T> ProgressBuilder<L, T> {
+impl<T, L> ProgressBuilder<T, L> {
     fn new(group: Arc<ProgressGroup>) -> Self {
         Self {
             group,
@@ -172,10 +182,10 @@ impl<L, T> ProgressBuilder<L, T> {
     }
 }
 
-impl<L, T> ProgressBuilder<L, T>
+impl<T, L> ProgressBuilder<T, L>
 where
-    L: Display,
     T: Display + Progressable,
+    L: Display,
 {
     pub fn label(&mut self, label: L) -> &mut Self {
         self.label = Some(label);
@@ -214,15 +224,17 @@ where
 
 pub struct Progress<T> {
     label: String,
+    status: Option<String>,
     max: T,
     max_string: String,
     current: T,
     line: usize,
     group: Arc<ProgressGroup>,
+    started: Instant,
 }
 
 impl<T> Progress<T> {
-    pub fn builder<L>(group: Arc<ProgressGroup>) -> ProgressBuilder<L, T> {
+    pub fn builder<L>(group: Arc<ProgressGroup>) -> ProgressBuilder<T, L> {
         ProgressBuilder::new(group)
     }
 }
@@ -241,11 +253,13 @@ where
 
         let this = Self {
             label,
+            status: None,
             max,
             max_string,
             current,
             line: group.lines.fetch_add(1, Ordering::Acquire) + 1,
             group,
+            started: Instant::now(),
         };
 
         this.draw();
@@ -255,6 +269,16 @@ where
 
     pub fn set_label(&mut self, label: impl Display) {
         self.label = label.to_string();
+        self.draw();
+    }
+
+    pub fn set_status(&mut self, status: impl Display) {
+        self.status = Some(status.to_string());
+        self.draw();
+    }
+
+    pub fn clear_status(&mut self) {
+        self.status = None;
         self.draw();
     }
 
@@ -271,10 +295,6 @@ where
 
         let mut out = std::io::stderr().lock();
 
-        self.group
-            .label_width
-            .fetch_max(self.label.len(), Ordering::AcqRel);
-
         // prefix
         let _ = write!(
             out,
@@ -286,7 +306,22 @@ where
             line = line, // write! + concat! is funky
         );
 
-        let label_width = self.group.label_width.load(Ordering::Relaxed);
+        let label_width = self
+            .group
+            .label_width
+            .fetch_max(self.label.len(), Ordering::AcqRel)
+            .max(self.label.len());
+
+        let status_width = if let Some(ref status) = self.status {
+            self.group
+                .status_width
+                .fetch_max(status.len(), Ordering::AcqRel)
+                .max(status.len())
+        } else {
+            self.group.status_width.load(Ordering::Relaxed)
+        } + self.group.style.status_frame.0.len()
+            + self.group.style.status_frame.1.len();
+
         let (num_str, num_len, den_len) = if self.group.style.use_percent {
             (None, 0, 0)
         } else {
@@ -302,18 +337,27 @@ where
             )
         };
 
-        // width - label_width - len('[] ')
         let progress_width = self.group.width
             - label_width
             - self.group.style.label_frame.0.len()
             - self.group.style.label_frame.1.len()
+            - self.group.style.progress_frame.0.len()
+            - self.group.style.progress_frame.1.len()
             - self.group.style.ratio_frame.0.len()
             - self.group.style.ratio_frame.1.len()
+            - if let Some(frame) = self.group.style.remaining_frame {
+                5// '00:00'
+                    + frame.0.len()
+                    + frame.1.len()
+            } else {
+                0
+            }
             - if self.group.style.use_percent {
-                4 // len('100%')
+                4 // '100%'
             } else {
                 num_len + 1 + den_len
-            };
+            }
+            - status_width;
 
         // TODO: make this not allocate
         let progress: String = if p.numerator >= p.denominator {
@@ -348,8 +392,34 @@ where
             close = self.group.style.label_frame.1,
         );
 
+        // remaining
+        if let Some(ref frame) = self.group.style.remaining_frame {
+            let elapsed = self.started.elapsed();
+            if p.numerator == 0 {
+                let _ = write!(out, "{open}--:--{close}", open = frame.0, close = frame.1,);
+            } else {
+                let remaining = (elapsed.as_millis() as u64 * p.denominator / p.numerator)
+                    .saturating_sub(elapsed.as_millis() as u64)
+                    .div_ceil(1000);
+                let _ = write!(
+                    out,
+                    "{open}{:02}:{:02}{close}",
+                    remaining / 60,
+                    remaining % 60,
+                    open = frame.0,
+                    close = frame.1,
+                );
+            }
+        }
+
         // progress bar
-        let _ = write!(out, "{:progress_width$}", progress);
+        let _ = write!(
+            out,
+            "{open}{:progress_width$}{close}",
+            progress,
+            open = self.group.style.progress_frame.0,
+            close = self.group.style.progress_frame.1,
+        );
 
         // progress number
         let _ = if self.group.style.use_percent {
@@ -370,6 +440,16 @@ where
                 close = self.group.style.ratio_frame.1,
             )
         };
+
+        if let Some(ref status) = self.status {
+            let _ = write!(
+                out,
+                "{open}{}{close}",
+                status,
+                open = self.group.style.status_frame.0,
+                close = self.group.style.status_frame.1,
+            );
+        }
 
         // suffix
         let _ = write!(
