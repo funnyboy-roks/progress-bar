@@ -2,8 +2,8 @@ use std::{
     fmt::Display,
     io::Write,
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, RwLock,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::Instant,
 };
@@ -130,7 +130,7 @@ impl ProgressGroupBuilder {
             terminal_size::terminal_size()
                 .expect("failed to get terminal size")
                 .0
-                 .0 as _
+                .0 as _
         };
         Arc::new(ProgressGroup::new(width, self.progress_width, self.style))
     }
@@ -167,6 +167,13 @@ pub struct ProgressGroup {
     den_len: AtomicUsize,
     label_len: AtomicUsize,
     status_len: AtomicUsize,
+}
+
+impl Drop for ProgressGroup {
+    fn drop(&mut self) {
+        // draw at the end, just to make sure everything is finished.
+        self.draw();
+    }
 }
 
 impl ProgressGroup {
@@ -328,6 +335,7 @@ impl ProgressGroup {
             // remaining
             if let Some(ref frame) = self.style.remaining_frame {
                 let elapsed = progress.started.elapsed();
+                #[allow(clippy::manual_checked_ops)]
                 if numerator == 0 {
                     let _ = write!(out, "{open}--:--{close}", open = frame.0, close = frame.1,);
                 } else {
@@ -390,7 +398,9 @@ impl ProgressGroup {
                 )
             };
 
-            if let Some(ref status) = text.status && !status.is_empty() {
+            if let Some(ref status) = text.status
+                && !status.is_empty()
+            {
                 let status_truncate = self
                     .width
                     .saturating_sub(full_label_len)
@@ -406,7 +416,7 @@ impl ProgressGroup {
                     if status_truncate == 0 {
                         ("", "")
                     } else {
-                        (&status[..status_truncate-1], "…")
+                        (&status[..status_truncate - 1], "…")
                     }
                 } else {
                     (status.as_str(), "")
