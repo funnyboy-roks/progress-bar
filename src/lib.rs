@@ -124,15 +124,11 @@ impl ProgressGroupBuilder {
     }
 
     pub fn build(&mut self) -> Arc<ProgressGroup> {
-        let width = if let Some(width) = self.width {
-            width
-        } else {
-            terminal_size::terminal_size()
-                .expect("failed to get terminal size")
-                .0
-                .0 as _
-        };
-        Arc::new(ProgressGroup::new(width, self.progress_width, self.style))
+        Arc::new(ProgressGroup::new(
+            self.width,
+            self.progress_width,
+            self.style,
+        ))
     }
 }
 
@@ -155,7 +151,7 @@ pub struct ProgressDisplay {
 #[derive(Debug)]
 pub struct ProgressGroup {
     items: RwLock<Vec<ProgressDisplay>>,
-    width: usize,
+    width: Option<usize>,
     progress_width: Option<usize>,
     is_drawing: AtomicBool,
     style: ProgressStyle,
@@ -181,7 +177,7 @@ impl ProgressGroup {
         ProgressGroupBuilder::default()
     }
 
-    fn new(width: usize, progress_width: Option<usize>, style: ProgressStyle) -> Self {
+    fn new(width: Option<usize>, progress_width: Option<usize>, style: ProgressStyle) -> Self {
         Self {
             items: RwLock::new(Vec::new()),
             width,
@@ -200,6 +196,15 @@ impl ProgressGroup {
         self.den_len.store(0, Ordering::Release);
         self.label_len.store(0, Ordering::Release);
         self.status_len.store(0, Ordering::Release);
+    }
+
+    fn width(&self) -> usize {
+        self.width.unwrap_or_else(|| {
+            terminal_size::terminal_size()
+                .expect("failed to get terminal size")
+                .0
+                .0 as _
+        })
     }
 
     pub fn draw(&self) {
@@ -314,7 +319,7 @@ impl ProgressGroup {
             };
 
             let progress_width = self.progress_width.unwrap_or_else(|| {
-                self.width
+                self.width()
                     - full_label_len
                     - full_remaining_len
                     - self.style.progress_frame.0.len()
@@ -401,7 +406,7 @@ impl ProgressGroup {
             match text.status.as_deref() {
                 Some(status) if !status.is_empty() => {
                     let status_truncate = self
-                        .width
+                        .width()
                         .saturating_sub(full_label_len)
                         .saturating_sub(full_remaining_len)
                         .saturating_sub(self.style.progress_frame.0.len())
