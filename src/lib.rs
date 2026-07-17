@@ -415,7 +415,13 @@ impl ProgressGroup {
                         if status_truncate == 0 {
                             ("", "")
                         } else {
-                            (&status[..status_truncate - 1], "…")
+                            (
+                                &status[..status_truncate - 1],
+                                concat!(
+                                    "\x1b[0m", // Reset Text colour
+                                    "…"
+                                ),
+                            )
                         }
                     } else {
                         (status, "")
@@ -436,7 +442,10 @@ impl ProgressGroup {
             // suffix
             let _ = writeln!(
                 out,
-                "\x1b[0K", // clear rest of line
+                concat!(
+                    "\x1b[0K", // clear rest of line
+                    "\x1b[0m", // Reset Text colour
+                )
             );
         }
 
