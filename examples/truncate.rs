@@ -1,15 +1,12 @@
 use std::time::Duration;
 
-use prog::{Progress, ProgressGroup};
+use prog::{Progress, ProgressGroup, ProgressStyle};
 
 fn main() {
     let group = ProgressGroup::builder()
         .width(108)
         .progress_width(80)
-        .style(prog::ProgressStyle {
-            use_percent: true,
-            ..Default::default()
-        })
+        .style(ProgressStyle::builder().use_percent(true))
         .build();
 
     let thread = {

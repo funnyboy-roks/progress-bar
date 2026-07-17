@@ -8,6 +8,8 @@ use std::{
     time::Instant,
 };
 
+use bauer::Builder;
+
 // TODO: ensure that atomic ordering is correct
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,67 +70,41 @@ pub enum BuildError {
     MissingInit,
 }
 
-#[derive(Debug, Clone, Copy)]
+// hack for bauer
+type Opt<T> = Option<T>;
+
+#[derive(Debug, Clone, Copy, Builder)]
+#[builder(
+    on((_, _) => tuple),
+)]
 pub struct ProgressStyle {
+    #[builder(default = r#"("", " ")"#)]
     pub label_frame: (&'static str, &'static str),
+    #[builder(default = r#"(" ", "")"#)]
     pub ratio_frame: (&'static str, &'static str),
+    #[builder(default = r#"("  ", "")"#)]
     pub status_frame: (&'static str, &'static str),
+    #[builder(default = r#"("[", "]")"#)]
     pub progress_frame: (&'static str, &'static str),
     /// None - don't show remaining time estimate
-    pub remaining_frame: Option<(&'static str, &'static str)>,
+    // TODO: once https://github.com/funnyboy-roks/bauer/issues/55 is done, use it here
+    #[builder(default = r#"Some(("", " "))"#)]
+    pub remaining_frame: Opt<(&'static str, &'static str)>,
+    #[builder(default = "'='")]
     pub bar: char,
+    #[builder(default = r#"">""#)]
     pub end: &'static str,
+    #[builder(default = "'='")]
     pub done: char,
+    #[builder(default = "' '")]
     pub empty: char,
+    #[builder(default)]
     pub use_percent: bool,
 }
 
 impl Default for ProgressStyle {
     fn default() -> Self {
-        Self {
-            label_frame: ("", " "),
-            ratio_frame: (" ", ""),
-            progress_frame: ("[", "]"),
-            status_frame: ("  ", ""),
-            remaining_frame: Some(("", " ")),
-            bar: '=',
-            end: ">",
-            done: '=',
-            empty: ' ',
-            use_percent: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ProgressGroupBuilder {
-    width: Option<usize>,
-    progress_width: Option<usize>,
-    style: ProgressStyle,
-}
-
-impl ProgressGroupBuilder {
-    pub fn width(&mut self, width: usize) -> &mut Self {
-        self.width = Some(width);
-        self
-    }
-
-    pub fn progress_width(&mut self, progress_width: usize) -> &mut Self {
-        self.progress_width = Some(progress_width);
-        self
-    }
-
-    pub fn style(&mut self, style: ProgressStyle) -> &mut Self {
-        self.style = style;
-        self
-    }
-
-    pub fn build(&mut self) -> Arc<ProgressGroup> {
-        Arc::new(ProgressGroup::new(
-            self.width,
-            self.progress_width,
-            self.style,
-        ))
+        Self::builder().build()
     }
 }
 
@@ -148,20 +124,31 @@ pub struct ProgressDisplay {
     started: Instant,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Builder)]
+#[builder(kind = "type-state")]
+#[builder(build_fn {
+    map = |g| -> Arc<ProgressGroup> { Arc::new(g) }
+})]
 pub struct ProgressGroup {
+    #[builder(skip)]
     items: RwLock<Vec<ProgressDisplay>>,
     width: Option<usize>,
     progress_width: Option<usize>,
+    #[builder(skip)]
     is_drawing: AtomicBool,
+    #[builder(into)]
     style: ProgressStyle,
     /// [ 5/10]
     ///  ^^
+    #[builder(skip)]
     num_len: AtomicUsize,
     /// [ 5/10]
     ///     ^^
+    #[builder(skip)]
     den_len: AtomicUsize,
+    #[builder(skip)]
     label_len: AtomicUsize,
+    #[builder(skip)]
     status_len: AtomicUsize,
 }
 
@@ -173,24 +160,6 @@ impl Drop for ProgressGroup {
 }
 
 impl ProgressGroup {
-    pub fn builder() -> ProgressGroupBuilder {
-        ProgressGroupBuilder::default()
-    }
-
-    fn new(width: Option<usize>, progress_width: Option<usize>, style: ProgressStyle) -> Self {
-        Self {
-            items: RwLock::new(Vec::new()),
-            width,
-            progress_width,
-            is_drawing: AtomicBool::new(false),
-            style,
-            num_len: Default::default(),
-            den_len: Default::default(),
-            label_len: Default::default(),
-            status_len: Default::default(),
-        }
-    }
-
     pub fn reset_widths(&self) {
         self.num_len.store(0, Ordering::Release);
         self.den_len.store(0, Ordering::Release);

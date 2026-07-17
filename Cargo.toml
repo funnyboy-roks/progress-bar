@@ -5,4 +5,5 @@ edition = "2024"
 rust-version = "1.85"
 
 [dependencies]
+bauer = { version = "0.5.0", git = "https://github.com/funnyboy-roks/bauer.git" }
 terminal_size = "0.4.3"
