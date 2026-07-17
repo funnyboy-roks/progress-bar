@@ -398,38 +398,39 @@ impl ProgressGroup {
                 )
             };
 
-            if let Some(ref status) = text.status
-                && !status.is_empty()
-            {
-                let status_truncate = self
-                    .width
-                    .saturating_sub(full_label_len)
-                    .saturating_sub(full_remaining_len)
-                    .saturating_sub(self.style.progress_frame.0.len())
-                    .saturating_sub(progress_width)
-                    .saturating_sub(self.style.progress_frame.1.len())
-                    .saturating_sub(full_ratio_len)
-                    .saturating_sub(self.style.status_frame.0.len())
-                    .saturating_sub(self.style.status_frame.1.len());
+            match text.status.as_deref() {
+                Some(status) if !status.is_empty() => {
+                    let status_truncate = self
+                        .width
+                        .saturating_sub(full_label_len)
+                        .saturating_sub(full_remaining_len)
+                        .saturating_sub(self.style.progress_frame.0.len())
+                        .saturating_sub(progress_width)
+                        .saturating_sub(self.style.progress_frame.1.len())
+                        .saturating_sub(full_ratio_len)
+                        .saturating_sub(self.style.status_frame.0.len())
+                        .saturating_sub(self.style.status_frame.1.len());
 
-                let (status, truncated) = if status_truncate < status.len() {
-                    if status_truncate == 0 {
-                        ("", "")
+                    let (status, truncated) = if status_truncate < status.len() {
+                        if status_truncate == 0 {
+                            ("", "")
+                        } else {
+                            (&status[..status_truncate - 1], "…")
+                        }
                     } else {
-                        (&status[..status_truncate - 1], "…")
-                    }
-                } else {
-                    (status.as_str(), "")
-                };
+                        (status, "")
+                    };
 
-                let _ = write!(
-                    out,
-                    "{open}{}{}{close}",
-                    status,
-                    truncated,
-                    open = self.style.status_frame.0,
-                    close = self.style.status_frame.1,
-                );
+                    let _ = write!(
+                        out,
+                        "{open}{}{}{close}",
+                        status,
+                        truncated,
+                        open = self.style.status_frame.0,
+                        close = self.style.status_frame.1,
+                    );
+                }
+                _ => {}
             }
 
             // suffix
