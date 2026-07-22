@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "bauer"
 version = "0.5.0"
-source = "git+https://github.com/funnyboy-roks/bauer.git#73c1c069ce77e64b7f88243ecd52ec982f4a214b"
+source = "git+https://github.com/funnyboy-roks/bauer.git#15cdd1cc6969b8e072e06c8e67b22d4b7fadb689"
 dependencies = [
  "bauer-macros",
  "version_check",
@@ -14,7 +14,7 @@ dependencies = [
 [[package]]
 name = "bauer-macros"
 version = "0.5.0"
-source = "git+https://github.com/funnyboy-roks/bauer.git#73c1c069ce77e64b7f88243ecd52ec982f4a214b"
+source = "git+https://github.com/funnyboy-roks/bauer.git#15cdd1cc6969b8e072e06c8e67b22d4b7fadb689"
 dependencies = [
  "convert_case",
  "proc-macro2",
